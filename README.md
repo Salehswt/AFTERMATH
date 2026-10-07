@@ -120,7 +120,7 @@ else; do not set it to `0.0.0.0`.
 <p align="center">
   <img src="docs/architecture.png" alt="AFTERMATH architecture — topology and telemetry paths">
   <br>
-  <sub>Interactive diagram → <a href="docs/architecture.html"><code>docs/architecture.html</code></a></sub>
+  <sub>Interactive diagram → <a href="https://salehswt.github.io/AFTERMATH/docs/architecture.html">open the live blueprint</a></sub>
 </p>
 
 | Layer | Components |
