@@ -1,0 +1,52 @@
+id: scenario_17_linux_cronpersist
+name: "Scheduled-job persistence & C2 beacon (Linux)"
+difficulty: medium
+requires: linux
+backstory: >
+  wkstn-lnx (172.30.0.50) keeps reaching out to an unfamiliar host at regular
+  intervals — even after reboots. It looks like something scheduled is calling
+  home. Find how the attacker made their access survive a restart, where the job
+  lives on disk, and which host it beacons to.
+seed_time_offset: "-7d"
+chain:
+  - technique: T1059.004
+    test: 1
+    note: "successful SSH as jdoe (the foothold), escalates via NOPASSWD sudo"
+  - technique: T1053.003
+    action: cron_persist
+    test: 1
+    note: "drops a root cron job under /etc/cron.d that beacons to the C2, then fires callbacks"
+
+# Validated by validate_detections.py: the cron.d write is a sudo COMMAND in
+# auth.log, and the callbacks are Suricata flows to the C2 seen by the victim sensor.
+expected_detections:
+  - source: auth
+    event_id: accepted
+    index: "logs-system.auth-*"
+    description: "the foothold session the persistence was installed from"
+    query: 'system.auth.ssh.event:"Accepted" AND host.name:"wkstn-lnx"'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "the cron persistence written under /etc/cron.d via sudo"
+    query: 'process.name:"sudo" AND message:"cron.d"'
+  - source: suricata
+    event_id: flow
+    index: "lab-edge-suricata-*"
+    description: "the scheduled beacon calling home to the C2"
+    query: 'destination.ip:"172.30.0.99"'
+
+iocs:
+  - { type: ip,      value: "172.30.0.99" }
+  - { type: account, value: "jdoe (NOPASSWD sudoer)" }
+  - { type: host,    value: "wkstn-lnx" }
+  - { type: file,    value: "/etc/cron.d/sys-refresh" }
+
+answer_summary: >
+  From the jdoe foothold the attacker established persistence with a scheduled job
+  (T1053.003): a root cron entry dropped at /etc/cron.d/sys-refresh that curls the
+  C2 at 172.30.0.99 every few minutes. Because it was written with sudo, the create
+  shows up in auth.log as a sudo COMMAND touching /etc/cron.d; because the beacon
+  runs on the victim, suricata-victim records the recurring flow to the C2. Unlike
+  a user crontab, an /etc/cron.d drop is easy to miss — hunt both the sudo write and
+  the periodic outbound flow, and remove the file to cut persistence.

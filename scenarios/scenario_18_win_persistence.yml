@@ -1,0 +1,50 @@
+id: scenario_18_win_persistence
+name: "Scheduled-task & service persistence (Windows)"
+difficulty: medium
+requires: windows
+backstory: >
+  WKSTN-01 was cleaned once already, but access keeps coming back after reboots.
+  The attacker planted more than one persistence mechanism so losing one doesn't
+  cost them the host. Using the workstation's Sysmon telemetry, find every way
+  they arranged to run again — a Run key won't be the whole story this time.
+seed_time_offset: "-4d"
+chain:
+  - technique: T1053.005
+    test: 2
+    note: "persistence via a locally-registered scheduled task (schtasks.exe)"
+  - technique: T1543.003
+    test: 2
+    note: "persistence via a new Windows service (sc.exe create)"
+
+# Validated by validate_detections.py against the seeded Sysmon telemetry. Both
+# mechanisms are process-create (Sysmon event 1) with a distinctive LOLBin.
+expected_detections:
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "scheduled task registered for persistence"
+    query: 'winlog.event_id:1 AND process.name:"schtasks.exe"'
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "the planted task's name (schtasks /TN spawn) — a specific IOC"
+    query: 'winlog.event_id:1 AND process.name:"schtasks.exe" AND process.command_line:*spawn*'
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "a new Windows service installed for persistence (sc create)"
+    query: 'winlog.event_id:1 AND process.name:"sc.exe" AND process.command_line:*create*'
+
+iocs:
+  - { type: host,    value: "WKSTN-01" }
+  - { type: process, value: "schtasks.exe /Create /TN spawn" }
+  - { type: process, value: "sc.exe create" }
+
+answer_summary: >
+  The attacker set up two independent persistence mechanisms on WKSTN-01 so a
+  single cleanup wouldn't evict them: a locally-registered scheduled task
+  (T1053.005) created with schtasks.exe /create, and a new Windows service
+  (T1543.003) installed with sc.exe create. Both surface as Sysmon process-create
+  (event 1) events — hunt schtasks.exe and sc.exe with creation command lines, then
+  enumerate scheduled tasks and services on the host to remove the planted entries.
+  A Run key search alone (scenario 01) would have missed both.

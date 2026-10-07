@@ -1,0 +1,36 @@
+id: scenario_11_web_scan
+name: "Automated web vulnerability scan (edge)"
+difficulty: easy
+requires: linux
+backstory: >
+  The web edge saw a rapid sweep from a single source: dozens of requests for
+  admin panels, backup files, .git, .env, phpinfo and known webshell names, mixed
+  with a few injection probes. It reads like an automated scanner, not a human.
+  Reconstruct the source and what it was hunting for.
+seed_time_offset: "-12d"
+chain:
+  - technique: T1595.002
+    action: web_scan
+    test: 1
+    note: "broad path enumeration + injection probes at the DVWA edge"
+expected_detections:
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "the scanner's probes the WAF flagged"
+    query: 'event.module:"modsecurity" AND source.ip:"172.30.0.100"'
+  - source: suricata
+    event_id: flow
+    index: "lab-edge-suricata-*"
+    description: "the burst of web requests on the wire from the scanner"
+    query: 'source.ip:"172.30.0.100"'
+iocs:
+  - { type: ip,   value: "172.30.0.100" }
+  - { type: path, value: "/.git/config, /.env, /phpinfo.php, /shell.php" }
+answer_summary: >
+  A single source (172.30.0.100) ran an automated sweep of the web edge
+  (T1595.002): requests for /admin, /backup, /.git/config, /.env, /phpinfo.php,
+  webshell names and a few injection probes, in a rapid burst. The tell is the
+  volume and variety from one IP in a short window. Some probes tripped the WAF
+  (lab-edge-modsecurity-*); the whole burst is visible as flows on the edge
+  sensor. Pivot on the source IP and the request rate.

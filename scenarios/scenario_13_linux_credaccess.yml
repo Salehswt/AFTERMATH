@@ -1,0 +1,37 @@
+id: scenario_13_linux_credaccess
+name: "Post-exploitation credential access (Linux)"
+difficulty: medium
+requires: linux
+backstory: >
+  With root on wkstn-lnx (172.30.0.50), the attacker went hunting for reusable
+  secrets — the shadow file, SSH keys and shell history. Reconstruct exactly
+  which credential stores they read, so you know what to rotate.
+seed_time_offset: "-14d"
+chain:
+  - technique: T1548.003
+    test: 1
+    note: "attacker already has root via sudo"
+  - technique: T1552.001
+    test: 1
+    note: "read /etc/shadow, /etc/gshadow, SSH host key, and bash history"
+expected_detections:
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "reading the shadow password hashes"
+    query: 'process.name:"sudo" AND message:shadow AND message:cat'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "reading root's shell history for secrets"
+    query: 'process.name:"sudo" AND message:bash_history'
+iocs:
+  - { type: file, value: "/etc/shadow" }
+  - { type: file, value: "/etc/ssh/ssh_host_rsa_key" }
+  - { type: host, value: "wkstn-lnx" }
+answer_summary: >
+  As root, the attacker read the credential stores directly (T1552.001):
+  `cat /etc/shadow` and `/etc/gshadow` for password hashes, the SSH host private
+  key, and `/root/.bash_history` for anything typed in the clear. Each is a sudo
+  command reading a sensitive file in auth.log. Anything read here — the password
+  hashes, the host key — must be treated as compromised and rotated.

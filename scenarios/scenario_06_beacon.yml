@@ -1,0 +1,34 @@
+id: scenario_06_beacon
+name: "Beaconing implant on the Linux host"
+difficulty: easy
+requires: linux
+backstory: >
+  wkstn-lnx (172.30.0.50) makes a short outbound HTTP request to the same host
+  at a very regular interval, around the clock. It looks automated, not like a
+  user browsing. Find the callback, the destination, and how it survives reboots.
+seed_time_offset: "-1d"
+chain:
+  - technique: T1053.003
+    action: cron_beacon
+    test: 1
+    note: "the implanted cron calls the C2 every minute (regular interval = beacon)"
+  - technique: T1071.001
+    action: cron_beacon
+    test: 1
+    note: "each callback is a small GET /beacon to the C2"
+expected_detections:
+  - source: suricata
+    event_id: flow
+    index: "lab-edge-suricata-*"
+    description: "regular small callbacks from the victim to the C2"
+    query: 'source.ip:"172.30.0.50" AND destination.ip:"172.30.0.99"'
+iocs:
+  - { type: ip,       value: "172.30.0.99" }
+  - { type: host,     value: "wkstn-lnx" }
+  - { type: schedule, value: "cron: * * * * * curl http://172.30.0.99/beacon" }
+answer_summary: >
+  A cron entry on wkstn-lnx calls http://172.30.0.99/beacon every minute
+  (T1053.003 for the persistence, T1071.001 for the C2 channel). The giveaway is
+  the *regularity* — near-identical small flows on a fixed interval, which is
+  what separates a beacon from human browsing. Pivot on the C2 IP; remove the
+  cron entry to kill persistence.

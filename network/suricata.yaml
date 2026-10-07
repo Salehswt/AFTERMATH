@@ -1,0 +1,80 @@
+%YAML 1.1
+---
+# Suricata config for the SOC homelab.
+# Sniffs the edge interface (shares the proxy's netns) and writes eve.json,
+# which Logstash ships into Elasticsearch. Kept lab-sized: ET Open ruleset,
+# eve output only, no pcap logging (keeps disk sane).
+
+vars:
+  address-groups:
+    HOME_NET: "[172.30.0.0/24]"          # the lab network
+    EXTERNAL_NET: "!$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+
+# ---- capture -----------------------------------------------------------------
+# This file is shared by both sensors; eth0 is whichever container's netns the
+# sensor joined — the proxy (edge traffic) or the victim (attack traffic).
+af-packet:
+  - interface: eth0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    use-mmap: yes
+    tpacket-v3: yes
+
+# ---- outputs -----------------------------------------------------------------
+outputs:
+  # The one that matters: structured JSON events, one per line.
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: /var/log/suricata/eve.json
+      types:
+        - alert:                          # IDS signature hits
+            metadata: yes
+            tagged-packets: no
+        - http:                           # every HTTP request (WAF-bypass hunts)
+            extended: yes
+        - dns
+        - tls:                            # SNI + JA3 for C2 fingerprinting
+            ja3: yes
+        - flow                            # connection records (the pivot data)
+        - anomaly
+
+  - stats:
+      enabled: no
+  - fast:
+      enabled: no                         # eve.json is the source of truth
+
+# ---- detection ---------------------------------------------------------------
+default-rule-path: /var/lib/suricata/rules
+rule-files:
+  - suricata.rules                        # ET Open, pulled by suricata-update
+  - lab.rules                             # lab-local sigs (internal scan/beacon)
+
+# ---- engine (lab-scale, keep memory modest) ----------------------------------
+app-layer:
+  protocols:
+    http: { enabled: yes }
+    tls:  { enabled: yes }
+    dns:  { enabled: yes }
+    smb:  { enabled: yes }                # lateral-movement visibility
+    ssh:  { enabled: yes }
+
+flow:
+  memcap: 128mb
+  hash-size: 65536
+  prealloc: 10000
+
+stream:
+  memcap: 64mb
+  reassembly:
+    memcap: 128mb
+
+logging:
+  default-log-level: notice
+  outputs:
+    - console:
+        enabled: yes

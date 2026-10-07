@@ -1,0 +1,53 @@
+# scenario_NN.yml — single source of truth for one intrusion.
+# BOTH the attack runner AND SOLUTIONS.md read from this file, so the seeded
+# telemetry and its answer key can never drift. Copy this, fill it in, then:
+#   ./lab.sh validate scenarios/scenario_NN.yml
+#
+# Required fields are marked (req). Everything else is optional but improves
+# the auto-generated solution.
+
+id: scenario_NN                    # (req) must match the filename
+name: "Short human title"          # (req) shown in list-attacks
+difficulty: easy                   # easy | medium | hard
+backstory: >                       # the prompt the analyst reads (no spoilers)
+  What the analyst is told happened. e.g. "Between the 3rd and 5th, this host
+  showed odd outbound traffic. Find initial access, persistence, and C2."
+
+seed_time_offset: "-4d"            # shift seeded events back this far so history
+                                  # reads as "last week", not "install o'clock"
+
+chain:                             # (req) ordered list of ATT&CK techniques
+  - technique: T1566.001           # (req) an Atomic Red Team technique ID
+    test: 1                        # (req) which atomic test number to run
+    note: "phishing attachment"    # optional, surfaces in the solution
+  - technique: T1204.002
+    test: 1
+    note: "user opens macro doc"
+  - technique: T1059.001
+    test: 2
+    note: "macro spawns encoded PowerShell"
+    cleanup: true                  # run the atomic's cleanup after (optional)
+
+expected_detections:               # what SHOULD appear in the SIEM — becomes the
+  #   'how to catch it' half of SOLUTIONS.md. Each entry needs an `index` and a
+  #   `query`: `./lab.sh validate-detections` runs the query against that index
+  #   after seeding and FAILS if it returns zero, so the answer key can't drift.
+  #   Write queries in Lucene/query_string (they read fine as KQL too).
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "PowerShell launched on the host"
+    query: 'winlog.event_id:1 AND process.name:"powershell.exe"'
+  - source: powershell
+    event_id: 4104
+    index: "logs-windows.powershell_operational-*"
+    description: "PowerShell script-block logging"
+    query: 'winlog.event_id:4104'
+
+iocs:                              # extracted into the solution's IOC table
+  - { type: ip,       value: "172.30.0.99" }
+  - { type: file,     value: "invoice.docm" }
+  - { type: registry, value: 'HKCU\\...\\Run\\Updater' }
+
+answer_summary: >                  # the plain-language "what happened" narrative
+  One-paragraph writeup of the full kill chain, in the voice of an IR report.

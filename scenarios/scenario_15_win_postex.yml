@@ -1,0 +1,46 @@
+id: scenario_15_win_postex
+name: "Credential dumping & discovery (Windows)"
+difficulty: hard
+requires: windows
+backstory: >
+  With elevated access on WKSTN-01, the attacker dumped LSASS to steal
+  credentials and enumerated the host. Reconstruct the tool they used, where the
+  dump landed, and what they looked at — so you know what to rotate.
+seed_time_offset: "-3d"
+chain:
+  - technique: T1003.001
+    test: 3
+    note: "dump LSASS memory (Outflank Dumpert, direct syscalls)"
+  - technique: T1087.001
+    test: 1
+    note: "local account discovery"
+  - technique: T1057
+    test: 2
+    note: "process discovery (tasklist)"
+expected_detections:
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "the LSASS-dumping tool executing"
+    query: 'winlog.event_id:1 AND process.name:"Outflank-Dumpert.exe"'
+  - source: sysmon
+    event_id: 11
+    index: "logs-windows.sysmon_operational-*"
+    description: "the LSASS memory dump file written to disk"
+    query: 'winlog.event_id:11 AND file.name:"dumpert.dmp"'
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "host discovery — process listing"
+    query: 'winlog.event_id:1 AND process.name:"tasklist.exe"'
+iocs:
+  - { type: host, value: "WKSTN-01" }
+  - { type: tool, value: "Outflank-Dumpert.exe" }
+  - { type: file, value: "C:\\Windows\\Temp\\dumpert.dmp" }
+answer_summary: >
+  The attacker dumped LSASS on WKSTN-01 with Outflank Dumpert (T1003.001), which
+  wrote the memory image to C:\Windows\Temp\dumpert.dmp — visible as the tool
+  process (Sysmon 1) and the dump file (Sysmon 11) — then enumerated local
+  accounts (T1087.001) and running processes (T1057). Every credential resident
+  in LSASS at that moment must be treated as stolen: rotate passwords and any
+  cached domain/service credentials, and hunt for reuse.

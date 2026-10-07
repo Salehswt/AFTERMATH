@@ -1,0 +1,37 @@
+id: scenario_12_linux_privesc
+name: "Privilege escalation via sudo (Linux)"
+difficulty: medium
+requires: linux
+backstory: >
+  After the jdoe foothold on wkstn-lnx (172.30.0.50), the account was used to
+  spawn root shells and act as root. jdoe shouldn't need that. Reconstruct how
+  the escalation happened and what was done with root.
+seed_time_offset: "-13d"
+chain:
+  - technique: T1059.004
+    test: 1
+    note: "attacker has SSH as jdoe"
+  - technique: T1548.003
+    test: 1
+    note: "abuse the NOPASSWD sudo rule: sudo su / sudo bash to get a root shell"
+expected_detections:
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "root shell spawned via sudo su"
+    query: 'process.name:"sudo" AND message:"su root"'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "root command shell via sudo bash -c"
+    query: 'process.name:"sudo" AND message:"bash -c"'
+iocs:
+  - { type: account, value: "jdoe (NOPASSWD sudoer)" }
+  - { type: host,    value: "wkstn-lnx" }
+  - { type: file,    value: "/root/.owned" }
+answer_summary: >
+  jdoe is a passwordless sudoer (the weak config), so after landing the foothold
+  the attacker simply escalated with `sudo su root -c ...` and `sudo bash -c ...`
+  to run as root (T1548.003). Both appear in auth.log as sudo commands invoking a
+  root shell — the tell is an interactive user spawning `su`/`bash` through sudo,
+  not a scripted admin task. Fix: remove the NOPASSWD:ALL rule.

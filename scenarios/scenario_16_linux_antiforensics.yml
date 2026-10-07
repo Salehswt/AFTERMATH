@@ -1,0 +1,59 @@
+id: scenario_16_linux_antiforensics
+name: "Anti-forensics — log & history wiping (Linux)"
+difficulty: medium
+requires: linux
+backstory: >
+  wkstn-lnx (172.30.0.50) looks suspiciously quiet — /var/log/wtmp and syslog are
+  empty and root's shell history is gone, yet the box was clearly used. Someone
+  tried to cover their tracks. The good news: the SIEM already holds what the host
+  no longer does. Reconstruct who escalated and exactly which logs they wiped.
+seed_time_offset: "-6d"
+chain:
+  - technique: T1059.004
+    test: 1
+    note: "successful SSH as jdoe (the foothold), then escalates via NOPASSWD sudo"
+  - technique: T1070.002
+    action: linux_antiforensics
+    test: 1
+    note: "clears /var/log/wtmp, btmp, syslog and root's bash_history via sudo"
+
+# Every query is validated against the seeded telemetry by validate_detections.py.
+# The whole point of the scenario: the destructive commands run THROUGH sudo, so
+# auth.log recorded the cover-up even though the target logs were truncated.
+expected_detections:
+  - source: auth
+    event_id: accepted
+    index: "logs-system.auth-*"
+    description: "the login the attacker cleaned up after"
+    query: 'system.auth.ssh.event:"Accepted" AND host.name:"wkstn-lnx"'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "log wiping — truncating files under /var/log via sudo"
+    query: 'process.name:"sudo" AND message:truncate'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "login records (wtmp) cleared to hide the session"
+    query: 'process.name:"sudo" AND message:wtmp'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "root's shell history wiped to hide what was typed"
+    query: 'process.name:"sudo" AND message:bash_history'
+
+iocs:
+  - { type: account, value: "jdoe (NOPASSWD sudoer)" }
+  - { type: host,    value: "wkstn-lnx" }
+  - { type: file,    value: "/var/log/wtmp (truncated)" }
+  - { type: file,    value: "/root/.bash_history (wiped)" }
+
+answer_summary: >
+  After landing the jdoe foothold and escalating (the account is a passwordless
+  sudoer), the attacker tried to erase their tracks (T1070.002): `truncate -s 0`
+  against /var/log/wtmp and /var/log/btmp, blanking /var/log/syslog, and clearing
+  /root/.bash_history — every step run through sudo. The irony is the tell: those
+  sudo COMMAND= entries are themselves in auth.log, and the events shipped to the
+  SIEM before the local files were wiped, so the timeline survives the cleanup.
+  Pivot on the sudo commands touching /var/log and .bash_history to bound exactly
+  what the attacker was trying to hide.

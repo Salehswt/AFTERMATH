@@ -1,0 +1,82 @@
+# Windows victim VM.
+#
+# Networking: the VM sits on its OWN host-only network (192.168.56.0/24, the
+# VirtualBox default range) — NOT the containers' 172.30.0.0/24. Two reasons:
+#   * the container subnet lives inside Docker's bridge (WSL2 on Windows); a
+#     host-only VM cannot reach it, and pretending it "shares" the subnet was
+#     the old bug.
+#   * on Linux, Docker already owns 172.30.0.1, so a host-only adapter there
+#     would collide.
+# The VM reaches the SIEM through the HOST: Docker publishes 9200/8220 on the
+# host, and the host's address on this host-only net is LAB_HOST_IP
+# (192.168.56.1 by VirtualBox default). The installer wires the Fleet policy so
+# the agent's Fleet + ES endpoints use that address over http.
+#
+# Provisioners run in order and are each idempotent.
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "gusztavvargadr/windows-10"   # MS eval image, no license/ISO
+  config.vm.hostname = "WKSTN-01"
+
+  # WinRM tuning. Vagrant's default execution_time_limit is PT2H, so when a
+  # provisioner's output channel dies mid-script - which happens intermittently
+  # on this box; the script finishes inside the VM but Vagrant never receives
+  # another byte - the installer blocks for TWO HOURS with no error and no
+  # diagnostic. Cap it well above the ~5-10 min a real provision takes, so a
+  # stalled channel FAILS fast instead of hanging, and the installer's retry can
+  # take over.
+  # ONLY execution_time_limit is changed. It is the WSMan *operation* timeout -
+  # how long a single provisioner command may run before WinRM gives up - and it
+  # is what turns the stall into a two-hour block at the default PT2H. PT20M is
+  # still far above the ~5-10 min a real provision takes.
+  #
+  # Deliberately NOT touching config.winrm.timeout / max_tries / retry_delay:
+  # those govern CONNECTING to the VM, and the guest is legitimately
+  # unreachable for minutes at a time (the post-weaken reboot, installing the
+  # Elastic Agent). Lowering them made Vagrant give up on a healthy build.
+  config.winrm.execution_time_limit = "PT20M"
+
+  # Host-only network. Static IP off the containers' subnet — no collision with
+  # the Linux victim (172.30.0.50) or Docker's gateway.
+  config.vm.network "private_network", ip: "192.168.56.20"
+
+  # Analyst access from the host. The provisioners talk to the VM over WinRM;
+  # for a human, the box ALREADY forwards a desktop and a shell to the host
+  # (don't re-declare these - the box does, and a duplicate host port errors):
+  #   RDP:  connect an RDP client to  localhost:53389  (user: vagrant  pass: vagrant)
+  #   SSH:  ssh vagrant@localhost -p 2222
+  # Run 'vagrant port' to see the live map if a default port was auto-corrected.
+  # (On VirtualBox you can also reach the VM directly at 192.168.56.20.)
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 4096
+    vb.cpus = 2
+    vb.gui = false
+  end
+  config.vm.provider "vmware_desktop" do |vm|
+    vm.memory = 4096
+    vm.cpus = 2
+  end
+
+  # From the installer: the enrollment token for the windows-victim policy, the
+  # in-Docker Fleet URL (the provisioner maps 'fleet-server' to LAB_HOST_IP in
+  # the VM's hosts file, where Docker publishes 8220 over plain HTTP), and the
+  # host IP for those hosts-file entries.
+  fleet_token = ENV["FLEET_TOKEN"]  || ""
+  fleet_url   = ENV["FLEET_URL"]    || "http://fleet-server:8220"
+  host_ip     = ENV["LAB_HOST_IP"]  || "192.168.56.1"
+
+  # reboot: true restarts the VM once 01-weaken finishes. EnableLUA=0 only takes
+  # effect after a restart anyway, and the reboot hands 02-05 a FRESH WinRM
+  # session: 01 is where the risky weakening happens (firewall rules, SMB
+  # signing, Defender) and where the output channel has been observed to die
+  # mid-script, so not carrying that session forward removes the window in which
+  # the later, longer provisioners inherit a half-dead channel.
+  config.vm.provision "01-weaken",   type: "shell", path: "provision/01-weaken.ps1",
+    reboot: true
+  config.vm.provision "02-logging",  type: "shell", path: "provision/02-logging.ps1"
+  config.vm.provision "03-vuln",     type: "shell", path: "provision/03-vuln-software.ps1"
+  config.vm.provision "04-agent",    type: "shell", path: "provision/04-elastic-agent.ps1",
+    env: { "FLEET_TOKEN" => fleet_token, "FLEET_URL" => fleet_url, "LAB_HOST_IP" => host_ip }
+  config.vm.provision "05-atomic",   type: "shell", path: "provision/05-atomic.ps1"
+end

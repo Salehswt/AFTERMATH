@@ -1,0 +1,68 @@
+id: scenario_02_linux
+name: "SSH brute force to foothold (Linux victim)"
+difficulty: easy
+requires: linux
+backstory: >
+  WKSTN-LNX (172.30.0.50) showed a burst of failed SSH logins on the 3rd,
+  followed by a successful one and outbound HTTP to an unfamiliar host.
+  Reconstruct: how they got in, which account, and where it called out to.
+seed_time_offset: "-3d"
+chain:
+  - technique: T1046
+    test: 1
+    note: "attacker port-scans the victim"
+  - technique: T1110.001
+    test: 1
+    note: "failed SSH password guesses (auth.log)"
+  - technique: T1059.004
+    test: 1
+    note: "successful SSH as jdoe, runs id/uname then escalates via NOPASSWD sudo"
+  - technique: T1071.001
+    test: 1
+    note: "beacon to C2 over HTTP"
+  - technique: T1105
+    test: 1
+    note: "pulls a second stage from C2"
+
+# Every query is validated against the seeded telemetry by
+# scripts/validate_detections.py. Lucene/query_string syntax.
+expected_detections:
+  - source: suricata
+    event_id: alert
+    index: "lab-edge-suricata-*"
+    description: "IDS alert from the attacker IP (the port scan / SSH burst)"
+    query: 'event.kind:"alert" AND source.ip:"172.30.0.100"'
+  - source: auth
+    event_id: failed
+    index: "logs-system.auth-*"
+    description: "burst of failed SSH auth on the victim"
+    query: 'system.auth.ssh.event:"Failed" AND host.name:"wkstn-lnx"'
+  - source: auth
+    event_id: accepted
+    index: "logs-system.auth-*"
+    description: "the successful login that followed the burst"
+    query: 'system.auth.ssh.event:"Accepted" AND host.name:"wkstn-lnx"'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "privilege escalation — attacker runs commands via sudo on the host"
+    query: 'process.name:"sudo" AND message:*COMMAND*'
+  - source: suricata
+    event_id: flow
+    index: "lab-edge-suricata-*"
+    description: "HTTP beacon / second-stage pull to the C2"
+    query: 'destination.ip:"172.30.0.99"'
+
+iocs:
+  - { type: ip,      value: "172.30.0.99" }
+  - { type: ip,      value: "172.30.0.100" }
+  - { type: account, value: "jdoe" }
+  - { type: host,    value: "wkstn-lnx" }
+
+answer_summary: >
+  Attacker at 172.30.0.100 scanned the host (T1046) — visible as a Suricata
+  alert — then brute-forced SSH (T1110.001): a burst of system.auth.ssh.event
+  "Failed" on wkstn-lnx followed by a single "Accepted" as jdoe (T1059.004).
+  The foothold then beaconed to 172.30.0.99 (T1071.001) and pulled a second
+  stage (T1105), both visible as Suricata flows to the C2. Pivot on the C2 IP
+  to find any other host that reached it.

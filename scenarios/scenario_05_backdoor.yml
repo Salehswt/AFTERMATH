@@ -1,0 +1,36 @@
+id: scenario_05_backdoor
+name: "Rogue account persistence (Linux)"
+difficulty: easy
+requires: linux
+backstory: >
+  A new local account named to look like a service account appeared on
+  wkstn-lnx (172.30.0.50), with sudo rights. No ticket authorised it.
+  Reconstruct how it was created and by whom.
+seed_time_offset: "-7d"
+chain:
+  - technique: T1059.004
+    test: 1
+    note: "attacker has SSH as jdoe"
+  - technique: T1136.001
+    test: 1
+    note: "create svc_update, set a password, add it to sudo"
+expected_detections:
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "account creation via sudo (useradd)"
+    query: 'process.name:"sudo" AND message:*useradd*'
+  - source: auth
+    event_id: accepted
+    index: "logs-system.auth-*"
+    description: "the SSH session the change was made from"
+    query: 'system.auth.ssh.event:"Accepted" AND host.name:"wkstn-lnx"'
+iocs:
+  - { type: account, value: "svc_update" }
+  - { type: host,    value: "wkstn-lnx" }
+answer_summary: >
+  From the jdoe SSH foothold, the attacker created a rogue account "svc_update"
+  with useradd, set a password, and added it to the sudo group (T1136.001) —
+  each step recorded in auth.log as a sudo command. A local account with a
+  service-like name and fresh sudo membership, created interactively, is the
+  tell. Disable it and hunt for logins under it.

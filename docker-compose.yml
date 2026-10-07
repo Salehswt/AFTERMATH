@@ -1,0 +1,279 @@
+# SOC homelab - core stack. All Linux services; the Windows victim is a VM.
+# Networks: lab_net (victim + edge + attacker), mgmt_net (SIEM).
+name: soc-lab
+
+networks:
+  lab_net:
+    driver: bridge
+    ipam: { config: [{ subnet: 172.30.0.0/24 }] }
+  mgmt_net:
+    driver: bridge
+
+services:
+  # ---- SIEM -----------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    environment:
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - xpack.security.enabled=true
+      - xpack.security.authc.api_key.enabled=true
+      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms2g -Xmx2g}"
+    ulimits: { memlock: { soft: -1, hard: -1 } }
+    volumes: [ es_data:/usr/share/elasticsearch/data ]
+    networks: [ mgmt_net, lab_net ]
+    # Bound to loopback by default. The ONLY thing outside this host that needs
+    # 9200/8220 is the optional Windows VM, which reaches them across its
+    # host-only / NAT adapter - so the installer sets LAB_BIND_IP to that
+    # adapter's address (192.168.56.1 or the VMware VMnet8 IP). Those are virtual
+    # adapters, not LAN interfaces, so the SIEM never becomes reachable from the
+    # physical network. Publishing on 0.0.0.0 would expose it to the whole subnet.
+    ports: [ "${LAB_BIND_IP:-127.0.0.1}:9200:9200" ]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -ksf -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      retries: 30
+
+  # One-shot: set kibana_system password AND mint a Fleet service token into a
+  # shared volume for fleet-server. Runs once after ES is healthy, then exits.
+  es-init:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    depends_on: { elasticsearch: { condition: service_healthy } }
+    networks: [ mgmt_net ]
+    restart: "no"
+    user: root                      # needs to write the shared token volume
+    volumes: [ fleet_token:/token ]
+    entrypoint: ["bash","-c"]
+    command:
+      - |
+        until curl -ksf -u elastic:${ELASTIC_PASSWORD} http://elasticsearch:9200/_cluster/health >/dev/null; do sleep 3; done
+        echo "Setting kibana_system password..."
+        curl -ksf -u elastic:${ELASTIC_PASSWORD} -X POST http://elasticsearch:9200/_security/user/kibana_system/_password -H "Content-Type: application/json" -d "{\"password\":\"${KIBANA_PASSWORD}\"}" || { echo "password set FAILED"; exit 1; }
+        echo
+        echo "Minting Fleet service token..."
+        rm -f /token/service-token
+        RESP=$$(curl -ksf -u elastic:${ELASTIC_PASSWORD} -X POST "http://elasticsearch:9200/_security/service/elastic/fleet-server/credential/token/lab-$$(date +%s)")
+        # tr -d strips the trailing newline: fleet-server puts the raw file
+        # contents into the Authorization header, and a newline makes it an
+        # "invalid header field value" — Fleet then never starts.
+        echo "$$RESP" | grep -o '"value":"[^"]*"' | cut -d'"' -f4 | tr -d '\r\n' > /token/service-token
+        if [ ! -s /token/service-token ]; then echo "token mint FAILED: $$RESP"; exit 1; fi
+        chmod 0644 /token/service-token
+        echo "Service token written ($$(wc -c < /token/service-token) bytes)."
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+      es-init: { condition: service_completed_successfully }
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+    volumes:
+      - ./siem/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+    networks: [ mgmt_net, lab_net ]
+    # Loopback only - the analyst browses Kibana at localhost:5601 (the Windows
+    # VM never talks to Kibana, only to :9200/:8220).
+    ports: [ "127.0.0.1:5601:5601" ]
+    healthcheck:
+      test: ["CMD-SHELL","curl -sf http://localhost:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 15s
+      retries: 40
+      start_period: 120s
+
+  fleet-server:
+    image: docker.elastic.co/elastic-agent/elastic-agent:${STACK_VERSION}
+    depends_on:
+      kibana: { condition: service_healthy }
+    environment:
+      - FLEET_SERVER_ENABLE=true
+      - FLEET_SERVER_ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - FLEET_SERVER_SERVICE_TOKEN_PATH=/token/service-token
+      - FLEET_SERVER_POLICY_ID=fleet-server-policy
+      - FLEET_SERVER_INSECURE_HTTP=true
+      - FLEET_SERVER_HOST=0.0.0.0
+      - FLEET_SERVER_PORT=8220
+    volumes: [ fleet_token:/token:ro ]
+    networks: [ mgmt_net, lab_net ]
+    # Same as elasticsearch: loopback unless the Windows VM needs to enroll,
+    # in which case the installer points LAB_BIND_IP at the host-only/NAT adapter.
+    ports: [ "${LAB_BIND_IP:-127.0.0.1}:8220:8220" ]
+
+  # ---- Edge: proxy -> WAF -> vulnerable app ---------------------------------
+  # Two web apps, each at the root of its own port so their absolute links work:
+  #   host :8080 -> waf      -> juice-shop
+  #   host :8081 -> waf-dvwa -> dvwa
+  proxy:
+    image: nginx:1.27
+    volumes: [ ./waf/nginx.conf:/etc/nginx/nginx.conf:ro ]
+    depends_on: [ waf, waf-dvwa ]
+    networks: [ lab_net ]
+    # Loopback only: these are the DELIBERATELY VULNERABLE apps (DVWA, Juice
+    # Shop - working SQLi/LFI/command injection). The attacker container reaches
+    # them over lab_net as http://proxy:80 / :81, never through these published
+    # ports, so binding to localhost costs nothing and keeps the vulnerable edge
+    # off the local network. They exist only so the analyst can browse the apps.
+    ports: [ "127.0.0.1:8080:80", "127.0.0.1:8081:81" ]
+
+  waf:
+    image: owasp/modsecurity-crs:nginx
+    environment:
+      - BACKEND=http://juiceshop:3000
+      - MODSEC_RULE_ENGINE=On
+      - MODSEC_AUDIT_LOG=/var/log/modsec/audit.log
+    volumes:
+      - ./waf/modsec:/etc/modsecurity.d/local:ro
+      # BIND mount, not a named volume: the nginx worker writes the Serial audit
+      # log as uid 101, and a Docker-Desktop named volume mounts root-owned with
+      # chown/chmod as no-ops. A host bind mount is writable by any uid.
+      - ./waf/modsec-logs:/var/log/modsec
+    networks: [ lab_net ]
+
+  juiceshop:
+    image: bkimminich/juice-shop:latest
+    networks: [ lab_net ]
+
+  # ---- Second edge app: DVWA (classic PHP/MySQL, deterministic vuln pages) ---
+  # A dedicated WAF instance (the CRS image fronts one backend) + a MariaDB so
+  # DVWA is fully usable. Attacks in scenario 03 hit it through waf-dvwa.
+  dvwa:
+    image: ghcr.io/digininja/dvwa:latest
+    environment:
+      - DB_SERVER=dvwa-db
+      - DB_DATABASE=dvwa
+      - DB_USERNAME=dvwa
+      - DB_PASSWORD=p@ssw0rd
+    depends_on: [ dvwa-db ]
+    networks: [ lab_net ]
+
+  dvwa-db:
+    image: mariadb:10
+    environment:
+      - MYSQL_ROOT_PASSWORD=dvwa
+      - MYSQL_DATABASE=dvwa
+      - MYSQL_USER=dvwa
+      - MYSQL_PASSWORD=p@ssw0rd
+    networks: [ lab_net ]
+
+  waf-dvwa:
+    image: owasp/modsecurity-crs:nginx
+    environment:
+      - BACKEND=http://dvwa:80
+      - MODSEC_RULE_ENGINE=On
+      - MODSEC_AUDIT_LOG=/var/log/modsec/audit-dvwa.log
+    volumes:
+      - ./waf/modsec:/etc/modsecurity.d/local:ro
+      - ./waf/modsec-logs:/var/log/modsec
+    networks: [ lab_net ]
+
+  # ---- Network sensor: EDGE ---------------------------------------------------
+  # Shares the proxy's netns, so it sees web traffic hitting nginx -> WAF -> app.
+  # It does NOT see attacker->victim traffic: on a bridge network those packets
+  # never enter this namespace. That side is covered by suricata-victim, in the
+  # linux-victim overlay.
+  suricata:
+    image: jasonish/suricata:latest
+    command: -i eth0
+    cap_add: [ NET_ADMIN, NET_RAW, SYS_NICE ]
+    network_mode: "service:proxy"
+    # NOT :ro — the jasonish/suricata entrypoint chowns its config on startup and
+    # aborts (exit 1) if the files are read-only.
+    volumes:
+      - ./network/suricata.yaml:/etc/suricata/suricata.yaml
+      - ./network/lab.rules:/var/lib/suricata/rules/lab.rules
+      - suricata_log:/var/log/suricata
+
+  # ---- Attacker: runs scenarios against the victim --------------------------
+  # Static IP: the scenarios and the answer key name this address as an IOC.
+  attacker:
+    build: ./attacks
+    networks:
+      lab_net:
+        ipv4_address: 172.30.0.100
+    volumes: [ ./scenarios:/scenarios:ro, ./attacks:/attacks:ro ]
+    tty: true
+
+  # ---- C2: the "unfamiliar host" the victim beacons to ----------------------
+  # Serves /beacon and /stage2 over plain HTTP so the callbacks in the scenarios
+  # actually complete (and show up as flows/HTTP in Suricata). Its request log is
+  # visible with: docker compose logs c2
+  c2:
+    image: python:3.12-alpine
+    hostname: c2
+    networks:
+      lab_net:
+        ipv4_address: 172.30.0.99
+    working_dir: /srv
+    command:
+      - sh
+      - -c
+      - |
+        printf 'ok\n' > /srv/beacon
+        printf '#!/bin/sh\necho staged\n' > /srv/stage2
+        exec python3 -m http.server 80
+
+  # ---- Ships WAF/proxy/sensor logs into Elastic -----------------------------
+  logstash-edge:
+    image: docker.elastic.co/logstash/logstash:${STACK_VERSION}
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - xpack.monitoring.enabled=false
+    volumes:
+      - ./siem/edge.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - ./waf/modsec-logs:/logs/modsec:ro
+      - suricata_log:/logs/suricata:ro
+      - suricata_victim_log:/logs/suricata-victim:ro   # empty unless the linux-victim overlay is used
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+      es-init: { condition: service_completed_successfully }
+    networks: [ mgmt_net, lab_net ]
+
+  # ---- One-shot: create Kibana data views + import the triage dashboard ------
+  kibana-setup:
+    image: curlimages/curl:8.8.0
+    depends_on:
+      kibana: { condition: service_healthy }
+    networks: [ mgmt_net ]
+    restart: "no"
+    volumes: [ ./dashboards:/dashboards:ro ]
+    entrypoint: ["sh","-c"]
+    command:
+      - |
+        create () {
+          curl -sf -u elastic:${ELASTIC_PASSWORD} -X POST http://kibana:5601/api/data_views/data_view \
+            -H "kbn-xsrf: true" -H "Content-Type: application/json" \
+            -d "{\"data_view\":{\"title\":\"$$1\",\"name\":\"$$2\",\"timeFieldName\":\"@timestamp\",\"allowNoIndex\":true}}" >/dev/null 2>&1 || true
+        }
+        create "lab-edge-*"  "Edge - Suricata & WAF"
+        create "logs-*"      "Agent logs"
+        create "metrics-*"   "Agent metrics"
+        echo "Kibana data views created."
+        # Import the pre-built triage dashboard + saved searches (each .ndjson
+        # carries its own data views, so references resolve on a fresh install).
+        for f in /dashboards/*.ndjson; do
+          [ -e "$$f" ] || continue
+          case "$$f" in *detection-rules.ndjson) continue ;; esac   # imported below
+          echo "Importing $$f ..."
+          curl -sf -u elastic:${ELASTIC_PASSWORD} -X POST \
+            "http://kibana:5601/api/saved_objects/_import?overwrite=true" \
+            -H "kbn-xsrf: true" -F file=@"$$f" >/dev/null 2>&1 \
+            && echo "  imported" || echo "  import failed (non-fatal)"
+        done
+        # Elastic Security detection rules: initialize the signals index, then
+        # import. The rules alert on the backdated telemetry on their next run.
+        curl -sf -u elastic:${ELASTIC_PASSWORD} -X POST \
+          "http://kibana:5601/api/detection_engine/index" -H "kbn-xsrf: true" >/dev/null 2>&1 || true
+        if [ -f /dashboards/detection-rules.ndjson ]; then
+          echo "Importing detection rules ..."
+          curl -sf -u elastic:${ELASTIC_PASSWORD} -X POST \
+            "http://kibana:5601/api/detection_engine/rules/_import?overwrite=true" \
+            -H "kbn-xsrf: true" -F file=@/dashboards/detection-rules.ndjson >/dev/null 2>&1 \
+            && echo "  rules imported" || echo "  rules import failed (non-fatal)"
+        fi
+
+volumes:
+  es_data:
+  suricata_log:
+  suricata_victim_log:
+  fleet_token:

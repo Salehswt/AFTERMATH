@@ -1,0 +1,78 @@
+id: scenario_01
+name: "Phishing to persistence"
+difficulty: easy
+# Office-lure -> PowerShell -> persistence chain, executed on the Windows victim
+# via Atomic Red Team. The Linux-only default build skips this one.
+requires: windows
+
+backstory: >
+  Between the 24th and 26th, WKSTN-01 generated unexpected process activity and
+  outbound connections during business hours. A user reported a spreadsheet that
+  "asked to enable content." Reconstruct what ran on the host, how the attacker
+  stayed, and what they looked at. The workstation's own logs (Sysmon +
+  PowerShell) are your primary evidence — this is a host investigation.
+
+seed_time_offset: "-5d"
+
+chain:
+  - technique: T1566.001
+    test: 1
+    note: "malicious attachment lands on disk (Sysmon file-create)"
+  - technique: T1204.002
+    test: 1
+    note: "user runs the lure"
+  - technique: T1059.001
+    test: 17
+    note: "PowerShell stager executes (self-contained command; script-block 4104 + process-create). Note: test 2 in the ATT&CK library is BloodHound/SharpHound - wrong action, downloads a fragile .exe that throws BadImageFormatException and trips AV; test 17 is clean and reliable."
+  - technique: T1105
+    test: 1
+    note: "stager reaches out for a second stage"
+  - technique: T1547.001
+    test: 1
+    note: "persistence via an HKCU Run key"
+    cleanup: false
+  - technique: T1082
+    test: 1
+    note: "light host discovery (whoami / systeminfo)"
+
+# Every query below is validated against the seeded telemetry by
+# scripts/validate_detections.py, so the answer key can't drift from what the
+# atomics actually generate. Queries are Lucene/query_string (Discover: switch
+# the search bar to Lucene, or they read fine as KQL too).
+expected_detections:
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "PowerShell launched on the host — the stager"
+    query: 'winlog.event_id:1 AND process.name:"powershell.exe"'
+  - source: powershell
+    event_id: 4104
+    index: "logs-windows.powershell_operational-*"
+    description: "PowerShell script-block logging captured what actually ran"
+    query: 'winlog.event_id:4104'
+  - source: sysmon
+    event_id: 13
+    index: "logs-windows.sysmon_operational-*"
+    description: "Run key written for persistence (the smoking gun)"
+    query: 'winlog.event_id:13 AND registry.path:*CurrentVersion*Run*'
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "Host discovery — whoami"
+    query: 'winlog.event_id:1 AND process.name:"whoami.exe"'
+
+iocs:
+  - { type: host,     value: "WKSTN-01" }
+  - { type: registry, value: 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run (value "Atomic Red Team")' }
+  - { type: process,  value: "powershell.exe launched interactively" }
+  - { type: process,  value: "whoami.exe (discovery)" }
+
+answer_summary: >
+  Execution landed as an encoded PowerShell stager (T1059.001) — visible both as
+  a Sysmon process-create (event 1, process.name powershell.exe) and in the
+  PowerShell Operational script-block log (event 4104). It reached out for a
+  second stage (T1105) and established persistence via a Run key under
+  HKCU\...\CurrentVersion\Run (Sysmon event 13), then ran basic discovery
+  (whoami / systeminfo, T1082). Because this is a host investigation, pivot on
+  the Run key and the PowerShell script-block contents rather than a C2 IP —
+  the workstation's Sysmon + PowerShell logs tell the whole story.

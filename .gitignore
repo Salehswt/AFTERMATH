@@ -1,0 +1,9 @@
+.env
+*.bak
+.vagrant/
+victim/config/sysmon-config.xml
+
+__pycache__/
+*.pyc
+waf/modsec-logs/*
+!waf/modsec-logs/.gitkeep

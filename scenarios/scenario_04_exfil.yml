@@ -1,0 +1,37 @@
+id: scenario_04_exfil
+name: "Data exfiltration over HTTP (Linux)"
+difficulty: medium
+requires: linux
+backstory: >
+  wkstn-lnx (172.30.0.50) archived a set of system files and pushed a large
+  outbound POST to an unfamiliar host during off-hours. Reconstruct: how the
+  attacker got the access, what they collected, and where it went.
+seed_time_offset: "-6d"
+chain:
+  - technique: T1059.004
+    test: 1
+    note: "attacker already has SSH as jdoe (see scenario 02)"
+  - technique: T1048.003
+    test: 1
+    note: "tar /etc/passwd + /etc/shadow + /etc/ssh, POST to the C2 over HTTP"
+expected_detections:
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "the collection step — a sudo archive command reading secrets"
+    query: 'process.name:"sudo" AND message:*tar*'
+  - source: suricata
+    event_id: flow
+    index: "lab-edge-suricata-*"
+    description: "the outbound exfil / staging flow to the C2"
+    query: 'source.ip:"172.30.0.50" AND destination.ip:"172.30.0.99"'
+iocs:
+  - { type: ip,   value: "172.30.0.99" }
+  - { type: host, value: "wkstn-lnx" }
+  - { type: file, value: "/tmp/loot.tgz" }
+answer_summary: >
+  Using the jdoe foothold (T1059.004), the attacker used NOPASSWD sudo to archive
+  /etc/passwd, /etc/shadow and /etc/ssh into /tmp/loot.tgz (visible in auth.log as
+  a sudo tar command) and exfiltrated it with an HTTP POST to 172.30.0.99
+  (T1048.003), then pulled a follow-on stage from the same host. Pivot on the C2
+  IP and on sudo commands that read credential files.

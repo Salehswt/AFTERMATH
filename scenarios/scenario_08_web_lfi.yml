@@ -1,0 +1,34 @@
+id: scenario_08_web_lfi
+name: "Local file inclusion / path traversal (DVWA)"
+difficulty: medium
+requires: linux
+backstory: >
+  Requests to the DVWA file-inclusion page tried to walk out of the web root and
+  read server files — classic ../ traversal, plus encoded and null-byte variants.
+  Reconstruct the source, the target file, and whether it succeeded.
+seed_time_offset: "-9d"
+chain:
+  - technique: T1083
+    action: web_lfi
+    test: 1
+    note: "../ traversal, doubled-encoded and null-byte variants aiming at /etc/passwd"
+expected_detections:
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "traversal attempts targeting the file-inclusion page"
+    query: 'source.ip:"172.30.0.100" AND url.original:*fi*'
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "attempts to read /etc/passwd"
+    query: 'source.ip:"172.30.0.100" AND url.original:*passwd*'
+iocs:
+  - { type: ip,  value: "172.30.0.100" }
+  - { type: url, value: "/vulnerabilities/fi/?page=../../../../etc/passwd" }
+answer_summary: >
+  The attacker at 172.30.0.100 abused the DVWA file-inclusion parameter (T1083)
+  with directory traversal (../../../../etc/passwd), a doubled-encoding bypass
+  (....//), and a null-byte variant, all aiming at /etc/passwd. ModSecurity's CRS
+  path-traversal rules blocked them and logged the URIs. Check whether any
+  returned file contents vs. a 403, and pivot on the source IP.

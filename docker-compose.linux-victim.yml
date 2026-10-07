@@ -1,0 +1,54 @@
+# Linux victim overlay - the beginner default. Adds a deliberately vulnerable
+# Ubuntu container with weak SSH, a couple of exposed services, an Elastic Agent
+# (enrolled by install.ps1 via /opt/enroll.sh), and Atomic Red Team so the
+# attacker container can generate telemetry. NO hypervisor required.
+name: soc-lab
+
+services:
+  linux-victim:
+    build:
+      context: ./victim/linux
+      # These are BUILD args, not runtime env: weaken.sh runs at image build
+      # time, so runtime `environment:` entries would have had no effect on the
+      # account it creates.
+      args:
+        STACK_VERSION: ${STACK_VERSION:-8.14.3}
+        VICTIM_USER: jdoe
+        VICTIM_PASS: Password123
+    hostname: WKSTN-LNX
+    networks:
+      lab_net:
+        ipv4_address: 172.30.0.50
+    # SSH for the analyst to get onto the victim (jdoe / Password123). Bound to
+    # 127.0.0.1 ONLY: this box is deliberately weak (guessable password, root
+    # login), so it must never be reachable from the LAN - only from this host.
+    #   ssh jdoe@localhost -p 2022
+    ports:
+      - "127.0.0.1:2022:22"
+    cap_add: [ SYS_PTRACE ]        # lets some ATT&CK tests run realistically
+    volumes:
+      - ./scenarios:/scenarios:ro
+    tty: true
+
+  # Network sensor for the VICTIM. Shares the victim's netns, so it sees every
+  # packet the attacker sends at it — the scan, the SSH attempts, the beacons.
+  # The edge sensor (docker-compose.yml) cannot see any of that.
+  suricata-victim:
+    image: jasonish/suricata:latest
+    command: -i eth0
+    cap_add: [ NET_ADMIN, NET_RAW, SYS_NICE ]
+    network_mode: "service:linux-victim"
+    depends_on: [ linux-victim ]
+    # NOT :ro — see the edge suricata service; the entrypoint chowns its config.
+    volumes:
+      - ./network/suricata.yaml:/etc/suricata/suricata.yaml
+      - ./network/lab.rules:/var/lib/suricata/rules/lab.rules
+      - suricata_victim_log:/var/log/suricata
+
+volumes:
+  suricata_victim_log:
+
+networks:
+  lab_net:
+    ipam:
+      config: [ { subnet: 172.30.0.0/24 } ]

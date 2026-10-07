@@ -1,0 +1,56 @@
+id: scenario_03_web
+name: "Web attack — SQLi & command injection (DVWA)"
+difficulty: easy
+# Runs on the default Docker build: the attacker container drives it against the
+# DVWA edge, so no VM is needed.
+requires: linux
+
+backstory: >
+  On the 2nd, the DVWA application behind the WAF logged a burst of requests from
+  a single source: scanner-like probing of common paths, then SQL injection and
+  command injection against the app's parameters. Reconstruct who it was, what
+  they tried, and what the WAF did about it. The evidence is in the WAF (CRS)
+  audit log and the edge sensor.
+
+seed_time_offset: "-2d"
+
+chain:
+  - technique: T1595.002
+    test: 1
+    note: "path/vuln probing at the web edge (proxy:81 -> DVWA)"
+  - technique: T1190
+    test: 1
+    note: "SQLi + command injection + LFI + XSS against DVWA; the WAF blocks (403)"
+
+# All queries validated by scripts/validate_detections.py. The attacker IP is
+# recovered from X-Forwarded-For (the WAF's direct client is the proxy).
+expected_detections:
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "the WAF (CRS) blocked injection attempts from the attacker"
+    query: 'event.module:"modsecurity" AND source.ip:"172.30.0.100"'
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "SQL injection against the /vulnerabilities/sqli page"
+    query: 'source.ip:"172.30.0.100" AND url.original:*sqli*'
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "command injection / file inclusion trying to read /etc/passwd"
+    query: 'source.ip:"172.30.0.100" AND url.original:*passwd*'
+
+iocs:
+  - { type: ip,  value: "172.30.0.100" }
+  - { type: url, value: "/vulnerabilities/sqli/?id=1' UNION SELECT user,password FROM users" }
+  - { type: url, value: "/vulnerabilities/exec/?ip=127.0.0.1;cat /etc/passwd" }
+  - { type: app, value: "DVWA (behind the WAF at proxy:81 / host :8081)" }
+
+answer_summary: >
+  A single source at 172.30.0.100 probed the DVWA edge (T1595.002) then launched
+  parameter attacks against it (T1190): SQL injection on /vulnerabilities/sqli,
+  command injection and local file inclusion attempting to read /etc/passwd, and
+  a reflected-XSS probe. ModSecurity (CRS) blocked each with a 403 and recorded
+  it — the audit log ships to lab-edge-modsecurity-* with the real client IP
+  pulled from X-Forwarded-For. Pivot on that source IP to see the full campaign.

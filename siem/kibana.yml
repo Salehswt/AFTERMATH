@@ -1,0 +1,49 @@
+server.host: "0.0.0.0"
+server.publicBaseUrl: "http://localhost:5601"
+monitoring.ui.container.elasticsearch.enabled: true
+
+# --- Encryption keys: REQUIRED or Fleet/alerting APIs stay disabled ----------
+# (Fixed values are fine for a local lab; regenerate for anything real.)
+xpack.encryptedSavedObjects.encryptionKey: "lab_encsavedobj_key_change_me_012345678901"
+xpack.security.encryptionKey:              "lab_security_key_change_me_01234567890123456"
+xpack.reporting.encryptionKey:             "lab_reporting_key_change_me_0123456789012345"
+
+# --- Fleet: preconfigure server host, output, and policies -------------------
+xpack.fleet.packages:
+  - name: fleet_server
+    version: latest
+  - name: system
+    version: latest
+
+# Single in-Docker host. Do NOT add a second host here for the external Windows
+# VM: an Elastic Agent ES output with multiple hosts LOAD-BALANCES (round-robin)
+# rather than failing over, so a host only some agents can reach breaks delivery
+# for everyone. The external VM ships via a STANDALONE agent instead
+# (see victim/provision/04-elastic-agent.ps1).
+xpack.fleet.outputs:
+  - id: default-output
+    name: default
+    type: elasticsearch
+    is_default: true
+    is_default_monitoring: true
+    hosts: [ "http://elasticsearch:9200" ]
+
+xpack.fleet.fleetServerHosts:
+  - id: default-fleet-server
+    name: default
+    is_default: true
+    host_urls: [ "http://fleet-server:8220" ]
+
+xpack.fleet.agentPolicies:
+  - name: Fleet Server Policy
+    id: fleet-server-policy
+    is_default_fleet_server: true
+    package_policies:
+      - name: fleet_server-1
+        package: { name: fleet_server }
+  - name: Victim Policy
+    id: victim-policy
+    is_default: true
+    package_policies:
+      - name: system-1
+        package: { name: system }

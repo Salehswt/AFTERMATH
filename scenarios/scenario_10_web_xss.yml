@@ -1,0 +1,34 @@
+id: scenario_10_web_xss
+name: "Cross-site scripting campaign (DVWA)"
+difficulty: easy
+requires: linux
+backstory: >
+  Several DVWA inputs received <script> payloads from one source — reflected,
+  stored and DOM sinks, some aimed at reading document.cookie. Reconstruct the
+  source, which sinks were targeted, and the intent.
+seed_time_offset: "-11d"
+chain:
+  - technique: T1189
+    action: web_xss
+    test: 1
+    note: "reflected, stored and DOM XSS payloads incl. document.cookie theft"
+expected_detections:
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "XSS payloads against the DVWA xss endpoints"
+    query: 'source.ip:"172.30.0.100" AND url.original:*xss*'
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "script tags in the request (any endpoint)"
+    query: 'source.ip:"172.30.0.100" AND url.original:*script*'
+iocs:
+  - { type: ip,  value: "172.30.0.100" }
+  - { type: url, value: "/vulnerabilities/xss_s/?txtName=<script>document.cookie</script>" }
+answer_summary: >
+  The attacker at 172.30.0.100 sprayed cross-site scripting payloads (T1189) at
+  DVWA's reflected (xss_r), stored (xss_s) and DOM (xss_d) sinks, including a
+  document.cookie exfiltration attempt on the stored form. ModSecurity's XSS
+  rules flagged the <script> content and logged the URIs. Stored XSS is the one
+  to worry about (it persists for other users); confirm the WAF blocked it.

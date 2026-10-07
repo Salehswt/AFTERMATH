@@ -1,0 +1,56 @@
+id: scenario_19_win_discovery
+name: "Host discovery & LOLBin proxy execution (Windows)"
+difficulty: medium
+requires: windows
+backstory: >
+  Early in the intrusion on WKSTN-01, before stealing anything, the attacker spent
+  time getting their bearings — enumerating the network configuration and active
+  connections — and ran code through a trusted signed Windows binary to stay under
+  the radar. Reconstruct their reconnaissance and the living-off-the-land execution
+  from the host's Sysmon process telemetry.
+seed_time_offset: "-4d"
+chain:
+  - technique: T1016
+    test: 1
+    note: "system network configuration discovery (ipconfig / arp / route / netstat)"
+  - technique: T1049
+    test: 1
+    note: "system network connections discovery (netstat -ano)"
+  - technique: T1218.011
+    test: 9
+    note: "signed-binary proxy execution — rundll32 proxies an app via pcwutl.dll,LaunchApplication (LOLBin)"
+
+# Validated by validate_detections.py against the seeded Sysmon telemetry. Each is
+# a process-create (Sysmon event 1); the rundll32 detection keys on the script
+# command line so it separates the attack from benign rundll32 activity.
+expected_detections:
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "network configuration discovery — ipconfig"
+    query: 'winlog.event_id:1 AND process.name:"ipconfig.exe"'
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "network connections discovery — netstat"
+    query: 'winlog.event_id:1 AND process.command_line:*netstat*'
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "LOLBin proxy execution — rundll32 loading pcwutl.dll to launch an app"
+    query: 'winlog.event_id:1 AND process.name:"rundll32.exe" AND process.command_line:*pcwutl*'
+
+iocs:
+  - { type: host,    value: "WKSTN-01" }
+  - { type: process, value: "ipconfig.exe / arp.exe / netstat.exe (discovery)" }
+  - { type: process, value: "rundll32.exe (signed-binary proxy execution)" }
+
+answer_summary: >
+  Before acting on objectives, the attacker oriented themselves on WKSTN-01:
+  system network configuration discovery (T1016) via ipconfig / arp / route, and
+  network connections discovery (T1049) via netstat -ano — a burst of built-in
+  recon utilities in a short window. They also abused a trusted signed binary,
+  rundll32.exe, to proxy execution via pcwutl.dll,LaunchApplication (T1218.011) — a
+  living-off-the-land technique that dodges application allow-listing. All are Sysmon process-create
+  events; the rundll32 line is the standout, since rundll32 spawning script content
+  is not normal. Pivot on the recon cluster to bound when the attacker was hands-on.

@@ -1,0 +1,29 @@
+# Lab-local Suricata signatures.
+#
+# Why these exist: ET Open is written for internet-facing traffic — most of its
+# rules key on $EXTERNAL_NET, and every host in this lab is inside HOME_NET, so
+# an internal scan or an internal beacon would sail past silently. These four
+# rules give the scenarios a guaranteed alert to hunt, without disabling ET Open.
+#
+# SIDs are in the 9000000 local range so they never collide with ET Open.
+
+# --- Recon -------------------------------------------------------------------
+alert tcp any any -> $HOME_NET any (msg:"LAB Port scan - SYN burst from single source"; \
+  flow:stateless; flags:S,12; \
+  threshold:type both, track by_src, count 20, seconds 10; \
+  sid:9000001; rev:1;)
+
+# --- Credential access -------------------------------------------------------
+alert tcp any any -> $HOME_NET 22 (msg:"LAB SSH connection burst - possible brute force"; \
+  flow:stateless; flags:S,12; \
+  threshold:type both, track by_src, count 5, seconds 60; \
+  sid:9000002; rev:1;)
+
+# --- Command and control -----------------------------------------------------
+alert http any any -> any any (msg:"LAB C2 beacon URI /beacon"; \
+  flow:established,to_server; http.uri; content:"/beacon"; \
+  sid:9000003; rev:1;)
+
+alert http any any -> any any (msg:"LAB Second-stage payload download /stage2"; \
+  flow:established,to_server; http.uri; content:"/stage2"; \
+  sid:9000004; rev:1;)

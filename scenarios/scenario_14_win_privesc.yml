@@ -1,0 +1,37 @@
+id: scenario_14_win_privesc
+name: "Privilege escalation on the workstation (Windows)"
+difficulty: medium
+requires: windows
+backstory: >
+  After the initial foothold on WKSTN-01, the attacker escalated: a known UAC
+  bypass and a token-impersonation trick to run with higher privilege.
+  Reconstruct the techniques from the host's Sysmon telemetry.
+seed_time_offset: "-3d"
+chain:
+  - technique: T1548.002
+    test: 1
+    note: "UAC bypass via Event Viewer — writes an HKCU mscfile shell-open hijack"
+  - technique: T1134.001
+    test: 1
+    note: "named-pipe token impersonation"
+expected_detections:
+  - source: sysmon
+    event_id: 13
+    index: "logs-windows.sysmon_operational-*"
+    description: "UAC bypass — the mscfile shell\\open\\command hijack in HKCU"
+    query: 'winlog.event_id:13 AND registry.path:*mscfile*'
+  - source: sysmon
+    event_id: 1
+    index: "logs-windows.sysmon_operational-*"
+    description: "token / named-pipe impersonation activity"
+    query: 'winlog.event_id:1 AND process.command_line:*pipe*'
+iocs:
+  - { type: host,     value: "WKSTN-01" }
+  - { type: registry, value: 'HKCU\Software\Classes\mscfile\shell\open\command' }
+answer_summary: >
+  The attacker escalated on WKSTN-01 with a UAC bypass through Event Viewer
+  (T1548.002) — the tell is a shell-open-command hijack written under
+  HKCU\...\mscfile in the Sysmon registry events — and a named-pipe token
+  impersonation (T1134.001), visible in process command lines. Both are
+  host-based; there is no network IOC. Hunt the mscfile registry write and the
+  pipe-impersonation process tree.

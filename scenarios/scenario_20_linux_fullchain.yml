@@ -1,0 +1,124 @@
+id: scenario_20_linux_fullchain
+name: "Full intrusion — foothold to exfil to cover-up (Linux)"
+difficulty: hard
+requires: linux
+backstory: >
+  wkstn-lnx (172.30.0.50) is a mess. Over one night it was scanned, logged into,
+  and by morning there was a strange new "service" account, files had left the
+  building, and parts of /var/log are blank. Leadership wants the whole story:
+  initial access, how they became root, what credentials and data they took, every
+  way they can get back in, and what they tried to erase. This is a complete
+  intrusion — reconstruct the entire timeline, in order, and give the full IOC set.
+  Nothing here is a single smoking gun; you have to chain the evidence yourself.
+seed_time_offset: "-9d"
+chain:
+  - technique: T1046
+    test: 1
+    note: "attacker port-scans the victim (recon)"
+  - technique: T1110.001
+    test: 1
+    note: "SSH password guessing — a burst of failures"
+  - technique: T1059.004
+    test: 1
+    note: "successful SSH as jdoe (the foothold), first sudo commands"
+  - technique: T1548.003
+    test: 1
+    note: "privilege escalation — abuses NOPASSWD sudo to get a root shell"
+  - technique: T1552.001
+    test: 1
+    note: "credential access — reads /etc/shadow, SSH keys, bash history as root"
+  - technique: T1136.001
+    test: 1
+    note: "persistence #1 — creates a rogue sudo account (svc_update)"
+  - technique: T1053.003
+    action: cron_persist
+    test: 1
+    note: "persistence #2 — root cron under /etc/cron.d beaconing to the C2"
+  - technique: T1048.003
+    test: 1
+    note: "collection + exfiltration — tars secrets and POSTs them to the C2"
+  - technique: T1070.002
+    action: linux_antiforensics
+    test: 1
+    note: "anti-forensics — wipes /var/log and root's bash history to cover tracks"
+
+# Every query is validated against the seeded telemetry by validate_detections.py.
+# This is a HARD scenario: the answer key spans the whole kill chain, and each stage
+# is a separate pivot the analyst has to connect into one timeline.
+expected_detections:
+  - source: suricata
+    event_id: alert
+    index: "lab-edge-suricata-*"
+    description: "1. recon — IDS alert from the attacker IP (the scan / SSH burst)"
+    query: 'event.kind:"alert" AND source.ip:"172.30.0.100"'
+  - source: auth
+    event_id: failed
+    index: "logs-system.auth-*"
+    description: "2. initial access — the burst of failed SSH auth"
+    query: 'system.auth.ssh.event:"Failed" AND host.name:"wkstn-lnx"'
+  - source: auth
+    event_id: accepted
+    index: "logs-system.auth-*"
+    description: "3. foothold — the successful login that followed the burst"
+    query: 'system.auth.ssh.event:"Accepted" AND host.name:"wkstn-lnx"'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "4. privilege escalation — root shell via sudo su"
+    query: 'process.name:"sudo" AND message:"su root"'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "5. credential access — reading the shadow password hashes"
+    query: 'process.name:"sudo" AND message:shadow AND message:cat'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "6. persistence #1 — rogue account creation (useradd)"
+    query: 'process.name:"sudo" AND message:*useradd*'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "7. persistence #2 — cron job written under /etc/cron.d"
+    query: 'process.name:"sudo" AND message:"cron.d"'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "8. collection — a sudo archive command reading secrets"
+    query: 'process.name:"sudo" AND message:*tar*'
+  - source: suricata
+    event_id: flow
+    index: "lab-edge-suricata-*"
+    description: "9. exfil / C2 — outbound flow from the victim to the C2"
+    query: 'source.ip:"172.30.0.50" AND destination.ip:"172.30.0.99"'
+  - source: auth
+    event_id: sudo
+    index: "logs-system.auth-*"
+    description: "10. anti-forensics — truncating logs under /var/log to cover tracks"
+    query: 'process.name:"sudo" AND message:truncate'
+
+iocs:
+  - { type: ip,      value: "172.30.0.100 (attacker)" }
+  - { type: ip,      value: "172.30.0.99 (C2 / exfil)" }
+  - { type: account, value: "jdoe (compromised foothold, NOPASSWD sudoer)" }
+  - { type: account, value: "svc_update (rogue persistence account)" }
+  - { type: host,    value: "wkstn-lnx" }
+  - { type: file,    value: "/etc/cron.d/sys-refresh (cron persistence)" }
+  - { type: file,    value: "/tmp/loot.tgz (staged exfil archive)" }
+  - { type: file,    value: "/var/log/wtmp, /root/.bash_history (wiped)" }
+
+answer_summary: >
+  A complete intrusion on wkstn-lnx, in order. The attacker at 172.30.0.100 scanned
+  the host (T1046) and brute-forced SSH (T1110.001) — a burst of failed logins then
+  a single Accepted as jdoe (T1059.004). Because jdoe is a passwordless sudoer, they
+  escalated to root (T1548.003) and read the credential stores — /etc/shadow, SSH
+  keys, bash history (T1552.001), so treat those as stolen and rotate them. They
+  established TWO persistence mechanisms: a rogue sudo account "svc_update"
+  (T1136.001) and a root cron job at /etc/cron.d/sys-refresh beaconing the C2
+  (T1053.003). They then archived secrets into /tmp/loot.tgz and exfiltrated over
+  HTTP to 172.30.0.99 (T1048.003) — visible as a victim→C2 flow — and finally tried
+  to cover their tracks by truncating /var/log files and wiping root's bash history
+  (T1070.002). The cover-up is self-defeating: every destructive step ran through
+  sudo and is in auth.log, and the events shipped to the SIEM before the local logs
+  were blanked. Deliverable: full timeline, both persistence mechanisms removed, and
+  every credential read here rotated.

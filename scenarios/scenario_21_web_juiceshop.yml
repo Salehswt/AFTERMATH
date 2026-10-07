@@ -1,0 +1,55 @@
+id: scenario_21_web_juiceshop
+name: "API attack on the shop app — SQLi & XSS (Juice Shop)"
+difficulty: medium
+requires: linux
+backstory: >
+  The second web app on the edge — the shop at http://localhost:8080 (OWASP Juice
+  Shop) — took a run of hostile requests against its REST API from a single source:
+  a login-bypass attempt, UNION-style injection in the product search, and a script
+  payload. This is the modern-app sibling of the DVWA cases: a JSON/REST target
+  behind its own WAF. Reconstruct which API endpoints were hit, what class of
+  attack each was, and confirm the WAF caught them.
+seed_time_offset: "-5d"
+chain:
+  - technique: T1190
+    action: web_juiceshop
+    test: 1
+    note: "SQLi auth-bypass + UNION search injection + XSS at the Juice Shop REST API"
+
+# Validated by validate_detections.py. The key discriminator: Juice Shop sits behind
+# its OWN WAF, which logs to /logs/modsec/audit.log (DVWA's WAF uses audit-dvwa.log),
+# so these detections isolate the shop app AND the attacker IP from ordinary browser
+# traffic (which appears as 172.30.0.1).
+expected_detections:
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "the shop-app WAF flagged the attacker's injection probes"
+    query: 'event.module:"modsecurity" AND source.ip:"172.30.0.100" AND log.file.path:"/logs/modsec/audit.log"'
+  - source: modsecurity
+    event_id: alert
+    index: "lab-edge-modsecurity-*"
+    description: "CRS SQL-injection rules tripped on the search API"
+    query: 'source.ip:"172.30.0.100" AND log.file.path:"/logs/modsec/audit.log" AND transaction.messages.details.tags:*sqli*'
+  - source: suricata
+    event_id: flow
+    index: "lab-edge-suricata-*"
+    description: "the attacker's web traffic on the wire at the edge"
+    query: 'source.ip:"172.30.0.100"'
+
+iocs:
+  - { type: ip,       value: "172.30.0.100 (attacker)" }
+  - { type: host,     value: "Juice Shop (proxy:80 -> waf -> juiceshop)" }
+  - { type: endpoint, value: "/rest/user/login (SQLi auth bypass)" }
+  - { type: endpoint, value: "/rest/products/search (UNION SQLi + XSS)" }
+
+answer_summary: >
+  A single source (172.30.0.100) attacked the Juice Shop REST API through its WAF
+  (T1190): a SQL-injection auth bypass on /rest/user/login, UNION-based injection in
+  /rest/products/search, and a reflected-XSS payload on the same search endpoint.
+  CRS blocked the injection attempts and logged them to the Juice Shop WAF's audit
+  log (log.file.path /logs/modsec/audit.log) — which is what separates this from the
+  DVWA cases (audit-dvwa.log) and from the constant benign browser traffic (source
+  172.30.0.1). The whole burst is also visible as edge Suricata flows from the
+  attacker IP. Pivot on the source IP and the /rest/* endpoints; confirm no request
+  from that IP returned a 200 with data.
